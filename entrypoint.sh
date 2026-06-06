@@ -92,7 +92,7 @@ if file_path.exists():
                 maintain_valid_nodes(force=False)
                 auto_switch_node()
             except Exception as e:
-                print(f"[自动切换后台补齐] 获取并测试节点失败: {e}", flush=True)
+                print(f\"[自动切换后台补齐] 获取并测试节点失败: {e}\", flush=True)
         
         threading.Thread(target=bg_fetch_and_switch, daemon=True).start()'''
         if target_loop in content:

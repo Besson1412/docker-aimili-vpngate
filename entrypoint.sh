@@ -82,10 +82,26 @@ if file_path.exists():
     return candidates'''
         if target in content:
             content = content.replace(target, replacement)
-            file_path.write_text(content, encoding='utf-8')
             print('Successfully patched vpngate_manager.py for custom nodes!', flush=True)
         else:
             print('Failed to find patch target in vpngate_manager.py!', flush=True)
+
+        # Fix infinite background thread loop in auto_switch_node
+        target_loop = '''        def bg_fetch_and_switch():
+            try:
+                maintain_valid_nodes(force=False)
+                auto_switch_node()
+            except Exception as e:
+                print(f"[自动切换后台补齐] 获取并测试节点失败: {e}", flush=True)
+        
+        threading.Thread(target=bg_fetch_and_switch, daemon=True).start()'''
+        if target_loop in content:
+            content = content.replace(target_loop, '        pass')
+            print('Successfully patched vpngate_manager.py to fix infinite thread loop!', flush=True)
+        else:
+            print('Failed to find infinite thread loop patch target in vpngate_manager.py!', flush=True)
+
+        file_path.write_text(content, encoding='utf-8')
 "
 
 # Create file if it doesn't exist

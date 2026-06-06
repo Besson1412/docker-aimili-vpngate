@@ -37,16 +37,31 @@ import time
 import json
 import re
 import threading
+import concurrent.futures
+from typing import Any
 
 file_path = Path('/opt/aimilivpn/vpngate_manager.py')
 if file_path.exists():
     content = file_path.read_text(encoding='utf-8')
 
+    # 0. Patch is_connecting initial value to False
+    if 'is_connecting = True' in content:
+        content = content.replace('is_connecting = True', 'is_connecting = False')
+        print("Successfully patched is_connecting initial value to False", flush=True)
+    else:
+        print("Successfully patched is_connecting initial value to False (already patched or not found)", flush=True)
+
     # 1. Patch lock block to add nodes_updating_lock
     if 'nodes_updating_lock = threading.Lock()' not in content:
-        content = content.replace('lock = threading.RLock()', '''lock = threading.RLock()
+        new_content = content.replace('lock = threading.RLock()', '''lock = threading.RLock()
 nodes_updating_lock = threading.Lock()''')
-        print("Successfully injected nodes_updating_lock definition", flush=True)
+        if new_content != content:
+            content = new_content
+            print("Successfully injected nodes_updating_lock definition", flush=True)
+        else:
+            print("ERROR: Failed to inject nodes_updating_lock!", flush=True)
+    else:
+        print("Successfully injected nodes_updating_lock definition (already patched)", flush=True)
 
     # 2. Inject helpers
     if 'def prepare_config_text' not in content:
@@ -99,8 +114,14 @@ def read_last_log_lines(file_path, max_lines=1000):
             pass
     lines.reverse()
     return lines'''
-        content = content.replace('STATE_FILE = DATA_DIR / "state.json"', helper_code)
-        print("Successfully injected helper functions", flush=True)
+        new_content = content.replace('STATE_FILE = DATA_DIR / "state.json"', helper_code)
+        if new_content != content:
+            content = new_content
+            print("Successfully injected helper functions", flush=True)
+        else:
+            print("ERROR: Failed to inject helper functions!", flush=True)
+    else:
+        print("Successfully injected helper functions (already patched)", flush=True)
 
     # 3. Patch test_worker and connect_node config writing to use prepare_config_text
     content = content.replace('temp_path.write_text(config_text, encoding="utf-8")', 'temp_path.write_text(prepare_config_text(config_text), encoding="utf-8")')
@@ -111,13 +132,20 @@ def read_last_log_lines(file_path, max_lines=1000):
         target_state = 'state["is_connecting"] = is_connecting'
         replacement_state = '''state["is_connecting"] = is_connecting
     state["is_updating_nodes"] = nodes_updating_lock.locked()'''
-        content = content.replace(target_state, replacement_state)
-        print("Successfully updated get_state() with is_updating_nodes", flush=True)
+        new_content = content.replace(target_state, replacement_state)
+        if new_content != content:
+            content = new_content
+            print("Successfully updated get_state() with is_updating_nodes", flush=True)
+        else:
+            print("ERROR: Failed to update get_state() with is_updating_nodes!", flush=True)
+    else:
+        print("Successfully updated get_state() with is_updating_nodes (already patched)", flush=True)
 
     # 5. Patch fetch_candidates() to load custom nodes
     if 'Load custom nodes from vpngate_data/custom/' not in content:
-        target_fetch = '    log_to_json("INFO", "Main", f"成功获取官方 API 节点，共 {len(candidates)} 个候选节点")\\n    return candidates'
-        replacement_fetch = '''    log_to_json("INFO", "Main", f"成功获取官方 API 节点，共 {len(candidates)} 个候选节点")
+        target_fetch = """    log_to_json("INFO", "Main", f"成功获取官方 API 节点，共 {len(candidates)} 个候选节点")
+    return candidates"""
+        replacement_fetch = """    log_to_json("INFO", "Main", f"成功获取官方 API 节点，共 {len(candidates)} 个候选节点")
     
     # Load custom nodes from vpngate_data/custom/
     custom_dir = DATA_DIR / "custom"
@@ -181,15 +209,24 @@ def read_last_log_lines(file_path, max_lines=1000):
                     print(f"[Custom Node Error] Failed to load {path.name}: {ce}", flush=True)
         except Exception as e:
             print(f"[Custom Node Error] Error scanning custom dir: {e}", flush=True)
-    return candidates'''
-        content = content.replace(target_fetch, replacement_fetch)
-        print("Successfully patched fetch_candidates() for custom nodes", flush=True)
+    return candidates"""
+        new_content = content.replace(target_fetch, replacement_fetch)
+        if new_content != content:
+            content = new_content
+            print("Successfully patched fetch_candidates() for custom nodes", flush=True)
+        else:
+            print("ERROR: Failed to patch fetch_candidates() for custom nodes!", flush=True)
+    else:
+        print("Successfully patched fetch_candidates() for custom nodes (already patched)", flush=True)
 
     # 6. Entire Block Replacement: test_multiple_nodes
     start = content.find("def test_multiple_nodes(node_ids: list[str])")
     end = content.find("def auto_switch_node(attempt: int = 0)")
     if start != -1 and end != -1:
-        new_test_fn = """def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
+        if 'updated_nodes_map = {}' in content[start:end]:
+            print("Successfully replaced test_multiple_nodes block (already patched)", flush=True)
+        else:
+            new_test_fn = """def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
     with lock:
         nodes = read_json(NODES_FILE, [])
         to_test = [n for n in nodes if n.get("id") in node_ids]
@@ -298,14 +335,19 @@ def read_last_log_lines(file_path, max_lines=1000):
             print(f"[test_multiple_nodes] 批量富化 IP 失败: {ee}", flush=True)
         
     return list(updated_nodes_map.values())"""
-        content = content[:start] + new_test_fn + "\n\n" + content[end:]
-        print("Successfully replaced test_multiple_nodes block", flush=True)
+            content = content[:start] + new_test_fn + "\n\n" + content[end:]
+            print("Successfully replaced test_multiple_nodes block", flush=True)
+    else:
+        print("ERROR: Could not find start or end for test_multiple_nodes block!", flush=True)
 
     # 7. Entire Block Replacement: auto_switch_node
     start = content.find("def auto_switch_node(attempt: int = 0)")
     end = content.find("def connect_node(node_id: str) -> str:")
     if start != -1 and end != -1:
-        new_switch_fn = """def auto_switch_node(attempt: int = 0) -> None:
+        if '连续切换失败已达 3 次' in content[start:end]:
+            print("Successfully replaced auto_switch_node block (already patched)", flush=True)
+        else:
+            new_switch_fn = """def auto_switch_node(attempt: int = 0) -> None:
     if attempt >= 3:
         print("[自动切换] 连续切换失败已达 3 次，停止切换以防止主线程死锁，将在后台重新加载节点...", flush=True)
         return
@@ -380,14 +422,19 @@ def read_last_log_lines(file_path, max_lines=1000):
                 item["active"] = False
             write_json(NODES_FILE, nodes)
         set_state(active_openvpn_node_id="", last_check_message=msg)"""
-        content = content[:start] + new_switch_fn + "\n\n" + content[end:]
-        print("Successfully replaced auto_switch_node block", flush=True)
+            content = content[:start] + new_switch_fn + "\n\n" + content[end:]
+            print("Successfully replaced auto_switch_node block", flush=True)
+    else:
+        print("ERROR: Could not find start or end for auto_switch_node block!", flush=True)
 
     # 8. Entire Block Replacement: maintain_valid_nodes
     start = content.find("def maintain_valid_nodes(force: bool = False)")
     end = content.find("def collector_loop() -> None:")
     if start != -1 and end != -1:
-        new_maintain_fn = """def maintain_valid_nodes(force: bool = False) -> str:
+        if 'to_test = to_test[:40]' in content[start:end]:
+            print("Successfully replaced maintain_valid_nodes block (already patched)", flush=True)
+        else:
+            new_maintain_fn = """def maintain_valid_nodes(force: bool = False) -> str:
     global active_openvpn_process, active_openvpn_node_id
     if not nodes_updating_lock.acquire(blocking=False):
         print("[维护线程] 节点更新及检测已在运行中，跳过本次请求", flush=True)
@@ -585,8 +632,10 @@ def read_last_log_lines(file_path, max_lines=1000):
         return message
     finally:
         nodes_updating_lock.release()"""
-        content = content[:start] + new_maintain_fn + "\n\n" + content[end:]
-        print("Successfully replaced maintain_valid_nodes block", flush=True)
+            content = content[:start] + new_maintain_fn + "\n\n" + content[end:]
+            print("Successfully replaced maintain_valid_nodes block", flush=True)
+    else:
+        print("ERROR: Could not find start or end for maintain_valid_nodes block!", flush=True)
 
     # 9. Patch /api/logs endpoint to use read_last_log_lines
     target_logs = '''        elif effective_path == "/api/logs":
@@ -620,12 +669,7 @@ def read_last_log_lines(file_path, max_lines=1000):
                                 entries.append(json.loads(line))
                             except Exception:
                                 pass'''
-    if target_logs in content:
-        content = content.replace(target_logs, replacement_logs)
-        print("Successfully patched /api/logs with read_last_log_lines", flush=True)
-    else:
-        # Check if it was already patched with deque and replace that
-        target_logs_deque = '''        elif effective_path == "/api/logs":
+    target_logs_deque = '''        elif effective_path == "/api/logs":
             logs_dir = DATA_DIR / "logs"
             date_str = time.strftime("%Y-%m-%d", time.localtime())
             log_file = logs_dir / f"{date_str}.json"
@@ -643,22 +687,42 @@ def read_last_log_lines(file_path, max_lines=1000):
                                 entries.append(json.loads(line))
                             except Exception:
                                 pass'''
-        if target_logs_deque in content:
-            content = content.replace(target_logs_deque, replacement_logs)
-            print("Successfully patched deque /api/logs with read_last_log_lines", flush=True)
+
+    if 'read_last_log_lines(log_file, 1000)' in content:
+        print("Successfully patched /api/logs with read_last_log_lines (already patched)", flush=True)
+    elif target_logs in content:
+        content = content.replace(target_logs, replacement_logs)
+        print("Successfully patched /api/logs with read_last_log_lines", flush=True)
+    elif target_logs_deque in content:
+        content = content.replace(target_logs_deque, replacement_logs)
+        print("Successfully patched deque /api/logs with read_last_log_lines", flush=True)
+    else:
+        print("ERROR: Failed to patch /api/logs with read_last_log_lines!", flush=True)
 
     # 10. Patch Javascript to poll when is_updating_nodes is True
-    content = content.replace('''  if (state.is_connecting) {
+    js_target1 = '''  if (state.is_connecting) {
     startConnectionPolling();
-  }''', '''  if (state.is_connecting || state.is_updating_nodes) {
+  }'''
+    js_replacement1 = '''  if (state.is_connecting || state.is_updating_nodes) {
     startConnectionPolling();
-  }''')
-    content = content.replace('''      if (!state.is_connecting) {
+  }'''
+    
+    js_target2 = '''      if (!state.is_connecting) {
         clearInterval(pollInterval);
-        pollInterval = null;''', '''      if (!state.is_connecting && !state.is_updating_nodes) {
+        pollInterval = null;'''
+    js_replacement2 = '''      if (!state.is_connecting && !state.is_updating_nodes) {
         clearInterval(pollInterval);
-        pollInterval = null;''')
-    print("Successfully patched Javascript in INDEX_HTML", flush=True)
+        pollInterval = null;'''
+
+    if 'state.is_updating_nodes' in content:
+        print("Successfully patched Javascript in INDEX_HTML (already patched)", flush=True)
+    else:
+        new_content = content.replace(js_target1, js_replacement1).replace(js_target2, js_replacement2)
+        if new_content != content:
+            content = new_content
+            print("Successfully patched Javascript in INDEX_HTML", flush=True)
+        else:
+            print("ERROR: Failed to patch Javascript in INDEX_HTML!", flush=True)
 
     file_path.write_text(content, encoding='utf-8')
     print("All patches applied to vpngate_manager.py successfully!", flush=True)

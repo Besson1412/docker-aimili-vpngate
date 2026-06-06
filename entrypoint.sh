@@ -5,6 +5,29 @@ set -e
 DATA_DIR=${VPNGATE_DATA_DIR:-"/opt/aimilivpn/vpngate_data"}
 mkdir -p "$DATA_DIR"
 mkdir -p "$DATA_DIR/custom"
+
+# Download Let's Encrypt Gen-Y and intermediate certificates for OpenVPN validation
+echo "Downloading Let's Encrypt intermediate certificates..."
+mkdir -p /opt/aimilivpn/certs
+cd /opt/aimilivpn/certs
+for url in https://letsencrypt.org/certs/2024/r10.pem \
+           https://letsencrypt.org/certs/2024/r11.pem \
+           https://letsencrypt.org/certs/2024/r12.pem \
+           https://letsencrypt.org/certs/2024/r13.pem \
+           https://letsencrypt.org/certs/2024/r14.pem \
+           https://letsencrypt.org/certs/gen-y/root-ye.pem \
+           https://letsencrypt.org/certs/gen-y/root-ye-by-x2.pem \
+           https://letsencrypt.org/certs/gen-y/root-yr.pem \
+           https://letsencrypt.org/certs/gen-y/root-yr-by-x1.pem \
+           https://letsencrypt.org/certs/gen-y/int-ye1.pem \
+           https://letsencrypt.org/certs/gen-y/int-ye2.pem \
+           https://letsencrypt.org/certs/gen-y/int-yr1.pem \
+           https://letsencrypt.org/certs/gen-y/int-yr2.pem; do
+  curl -s -S -O "$url" || true
+done
+cat *.pem >> /etc/ssl/certs/ca-certificates.crt || true
+cd /opt/aimilivpn
+
 AUTH_FILE="$DATA_DIR/ui_auth.json"
 
 # Patch vpngate_manager.py to support custom OpenVPN configuration files
@@ -100,6 +123,78 @@ if file_path.exists():
             print('Successfully patched vpngate_manager.py to fix infinite thread loop!', flush=True)
         else:
             print('Failed to find infinite thread loop patch target in vpngate_manager.py!', flush=True)
+
+        # Inject prepare_config_text helper function
+        target_state = 'STATE_FILE = DATA_DIR / \"state.json\"'
+        replacement_state = '''STATE_FILE = DATA_DIR / \"state.json\"
+
+def prepare_config_text(config_text: str) -> str:
+    try:
+        from pathlib import Path
+        ca_path = Path(\"/etc/ssl/certs/ca-certificates.crt\")
+        if ca_path.exists():
+            ca_content = ca_path.read_text(encoding=\"utf-8\")
+            if \"</ca>\" in config_text:
+                config_text = config_text.replace(\"</ca>\", f\"\\\\n{ca_content}\\\\n</ca>\")
+    except Exception:
+        pass
+    return config_text'''
+        if target_state in content and 'def prepare_config_text' not in content:
+            content = content.replace(target_state, replacement_state)
+            print('Successfully injected prepare_config_text helper!', flush=True)
+
+        # Patch test_worker and test_node_by_id to use prepare_config_text
+        target_write = 'temp_path.write_text(config_text, encoding=\"utf-8\")'
+        replacement_write = 'temp_path.write_text(prepare_config_text(config_text), encoding=\"utf-8\")'
+        if target_write in content:
+            content = content.replace(target_write, replacement_write)
+            print('Successfully patched config writing to use prepare_config_text!', flush=True)
+
+        # Patch connect_node to use prepare_config_text
+        target_connect = 'config_path.write_text(node.get(\"config_text\") or \"\", encoding=\"utf-8\")'
+        replacement_connect = 'config_path.write_text(prepare_config_text(node.get(\"config_text\") or \"\"), encoding=\"utf-8\")'
+        if target_connect in content:
+            content = content.replace(target_connect, replacement_connect)
+            print('Successfully patched connect_node to use prepare_config_text!', flush=True)
+
+        # Optimize /api/logs to use deque and release lock quickly
+        target_logs = '''        elif effective_path == \"/api/logs\":
+            logs_dir = DATA_DIR / \"logs\"
+            date_str = time.strftime(\"%Y-%m-%d\", time.localtime())
+            log_file = logs_dir / f\"{date_str}.json\"
+            entries = []
+            if log_file.exists():
+                try:
+                    with lock:
+                        with open(log_file, \"r\", encoding=\"utf-8\") as f:
+                            for line in f:
+                                line = line.strip()
+                                if line:
+                                    try:
+                                        entries.append(json.loads(line))
+                                    except Exception:
+                                        pass'''
+        replacement_logs = '''        elif effective_path == \"/api/logs\":
+            logs_dir = DATA_DIR / \"logs\"
+            date_str = time.strftime(\"%Y-%m-%d\", time.localtime())
+            log_file = logs_dir / f\"{date_str}.json\"
+            entries = []
+            if log_file.exists():
+                try:
+                    from collections import deque
+                    with lock:
+                        with open(log_file, \"r\", encoding=\"utf-8\") as f:
+                            lines = deque(f, maxlen=1000)
+                    for line in lines:
+                        line = line.strip()
+                        if line:
+                            try:
+                                entries.append(json.loads(line))
+                            except Exception:
+                                pass'''
+        if target_logs in content:
+            content = content.replace(target_logs, replacement_logs)
+            print('Successfully optimized /api/logs with deque!', flush=True)
 
         file_path.write_text(content, encoding='utf-8')
 "

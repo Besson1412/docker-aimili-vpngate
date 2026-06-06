@@ -1,7 +1,7 @@
 FROM alpine:latest
 
 # 安装系统依赖（支持 Python3 及 OpenVPN 网络栈）
-RUN apk add --no-cache python3 openvpn bash curl iproute2 iptables git
+RUN apk add --no-cache python3 openvpn bash curl iproute2 iptables git ca-certificates
 
 # 克隆 aimili-vpngate 开源项目源码到容器目录
 RUN git clone https://github.com/baoweise-bot/aimili-vpngate.git /opt/aimilivpn

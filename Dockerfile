@@ -8,7 +8,12 @@ RUN git clone https://github.com/baoweise-bot/aimili-vpngate.git /opt/aimilivpn
 
 WORKDIR /opt/aimilivpn
 
+# 复制入口脚本并赋予执行权限
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh
+
 # 暴露 7928 (代理服务端口) 和 8787 (Web管理页面端口)
 EXPOSE 7928 8787
 
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
 CMD ["python3", "vpngate_manager.py"]

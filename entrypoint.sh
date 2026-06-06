@@ -44,7 +44,8 @@ if file_path.exists():
 
     # 1. Patch lock block to add nodes_updating_lock
     if 'nodes_updating_lock = threading.Lock()' not in content:
-        content = content.replace('lock = threading.RLock()', 'lock = threading.RLock()\\nnodes_updating_lock = threading.Lock()')
+        content = content.replace('lock = threading.RLock()', '''lock = threading.RLock()
+nodes_updating_lock = threading.Lock()''')
         print("Successfully injected nodes_updating_lock definition", flush=True)
 
     # 2. Inject helpers
@@ -108,7 +109,8 @@ def read_last_log_lines(file_path, max_lines=1000):
     # 4. Patch get_state() to add is_updating_nodes
     if 'state["is_updating_nodes"]' not in content:
         target_state = 'state["is_connecting"] = is_connecting'
-        replacement_state = 'state["is_connecting"] = is_connecting\\n    state["is_updating_nodes"] = nodes_updating_lock.locked()'
+        replacement_state = '''state["is_connecting"] = is_connecting
+    state["is_updating_nodes"] = nodes_updating_lock.locked()'''
         content = content.replace(target_state, replacement_state)
         print("Successfully updated get_state() with is_updating_nodes", flush=True)
 
@@ -646,8 +648,16 @@ def read_last_log_lines(file_path, max_lines=1000):
             print("Successfully patched deque /api/logs with read_last_log_lines", flush=True)
 
     # 10. Patch Javascript to poll when is_updating_nodes is True
-    content = content.replace('  if (state.is_connecting) {\\n    startConnectionPolling();\\n  }', '  if (state.is_connecting || state.is_updating_nodes) {\\n    startConnectionPolling();\\n  }')
-    content = content.replace('      if (!state.is_connecting) {\\n        clearInterval(pollInterval);\\n        pollInterval = null;', '      if (!state.is_connecting && !state.is_updating_nodes) {\\n        clearInterval(pollInterval);\\n        pollInterval = null;')
+    content = content.replace('''  if (state.is_connecting) {
+    startConnectionPolling();
+  }''', '''  if (state.is_connecting || state.is_updating_nodes) {
+    startConnectionPolling();
+  }''')
+    content = content.replace('''      if (!state.is_connecting) {
+        clearInterval(pollInterval);
+        pollInterval = null;''', '''      if (!state.is_connecting && !state.is_updating_nodes) {
+        clearInterval(pollInterval);
+        pollInterval = null;''')
     print("Successfully patched Javascript in INDEX_HTML", flush=True)
 
     file_path.write_text(content, encoding='utf-8')

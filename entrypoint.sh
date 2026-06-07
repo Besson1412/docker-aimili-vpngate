@@ -223,7 +223,7 @@ def read_last_log_lines(file_path, max_lines=1000):
     start = content.find("def test_multiple_nodes(node_ids: list[str])")
     end = content.find("def auto_switch_node(attempt: int = 0)")
     if start != -1 and end != -1:
-        if 'prepare_config_text(config_text)' in content[start:end]:
+        if 'n.update(res)' in content[start:end]:
             print("Successfully replaced test_multiple_nodes block (already patched)", flush=True)
         else:
             new_test_fn = """def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
@@ -773,15 +773,19 @@ def read_last_log_lines(file_path, max_lines=1000):
     success = False
     for attempt in range(1, 4):
         try:
-            # Try to resolve peer gateway IP
+            # Try to resolve peer gateway IP and local IP
             peer_ip = None
+            local_ip = None
             try:
                 res_addr = subprocess.run(["ip", "addr", "show", "dev", interface], capture_output=True, text=True, timeout=2)
                 if res_addr.returncode == 0:
                     import re
-                    match = re.search(r"peer\s+([\d.]+)", res_addr.stdout)
-                    if match:
-                        peer_ip = match.group(1)
+                    match_peer = re.search(r"peer\s+([\d.]+)", res_addr.stdout)
+                    if match_peer:
+                        peer_ip = match_peer.group(1)
+                    match_local = re.search(r"inet\s+([\d.]+)", res_addr.stdout)
+                    if match_local:
+                        local_ip = match_local.group(1)
             except Exception:
                 pass
             
@@ -791,6 +795,10 @@ def read_last_log_lines(file_path, max_lines=1000):
             else:
                 subprocess.run(["ip", "route", "add", "default", "dev", interface, "table", "100"], check=True, timeout=2)
                 print(f"[policy_routing] Added default route dev {interface} (peer IP not resolved)", flush=True)
+                
+            if local_ip:
+                subprocess.run(["ip", "rule", "add", "from", local_ip, "table", "100"], check=True, timeout=2)
+                print(f"[policy_routing] Added policy rule from {local_ip} to table 100", flush=True)
                 
             subprocess.run(["ip", "rule", "add", "oif", interface, "table", "100"], check=True, timeout=2)
             
@@ -830,9 +838,12 @@ def read_last_log_lines(file_path, max_lines=1000):
 
         replacement_cleanup = r"""def cleanup_policy_routing() -> None:
     try:
-        subprocess.run(["ip", "rule", "del", "table", "100"], capture_output=True, timeout=2)
+        for _ in range(10):
+            res = subprocess.run(["ip", "rule", "del", "table", "100"], capture_output=True, timeout=2)
+            if res.returncode != 0:
+                break
         subprocess.run(["ip", "route", "flush", "table", "100"], capture_output=True, timeout=2)
-        print("[policy_routing] Cleared policy routing table 100", flush=True)
+        print("[policy_routing] Cleared policy routing table 100 and rules", flush=True)
     except Exception:
         pass
     try:

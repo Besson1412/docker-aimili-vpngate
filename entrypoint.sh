@@ -223,7 +223,7 @@ def read_last_log_lines(file_path, max_lines=1000):
     start = content.find("def test_multiple_nodes(node_ids: list[str])")
     end = content.find("def auto_switch_node(attempt: int = 0)")
     if start != -1 and end != -1:
-        if 'updated_nodes_map = {}' in content[start:end]:
+        if 'prepare_config_text(config_text)' in content[start:end]:
             print("Successfully replaced test_multiple_nodes block (already patched)", flush=True)
         else:
             new_test_fn = """def test_multiple_nodes(node_ids: list[str]) -> list[dict[str, Any]]:
@@ -344,7 +344,7 @@ def read_last_log_lines(file_path, max_lines=1000):
     start = content.find("def auto_switch_node(attempt: int = 0)")
     end = content.find("def connect_node(node_id: str) -> str:")
     if start != -1 and end != -1:
-        if '连续切换失败已达 3 次' in content[start:end]:
+        if 'bg_fetch_and_switch' not in content[start:end]:
             print("Successfully replaced auto_switch_node block (already patched)", flush=True)
         else:
             new_switch_fn = """def auto_switch_node(attempt: int = 0) -> None:
@@ -723,6 +723,130 @@ def read_last_log_lines(file_path, max_lines=1000):
             print("Successfully patched Javascript in INDEX_HTML", flush=True)
         else:
             print("ERROR: Failed to patch Javascript in INDEX_HTML!", flush=True)
+
+    # 11. Patch setup_policy_routing and cleanup_policy_routing for NAT and Peer Gateway
+    if 'iptables -t nat -A POSTROUTING' in content:
+        print("Successfully patched setup_policy_routing and cleanup_policy_routing (already patched)", flush=True)
+    else:
+        target_setup = """def setup_policy_routing(interface: str = "tun0") -> None:
+    try:
+        subprocess.run(["ip", "rule", "del", "table", "100"], capture_output=True, timeout=2)
+    except Exception:
+        pass
+    try:
+        subprocess.run(["ip", "route", "flush", "table", "100"], capture_output=True, timeout=2)
+    except Exception:
+        pass
+    
+    success = False
+    for attempt in range(1, 4):
+        try:
+            subprocess.run(["ip", "route", "add", "default", "dev", interface, "table", "100"], check=True, timeout=2)
+            subprocess.run(["ip", "rule", "add", "oif", interface, "table", "100"], check=True, timeout=2)
+            # 配置反向路径过滤 rp_filter 为 loose 模式 (2)，防止回包被内核静默丢弃
+            for proc_path in ["all", "default", interface]:
+                try:
+                    subprocess.run(["sysctl", "-w", f"net.ipv4.conf.{proc_path}.rp_filter=2"], capture_output=True, timeout=2)
+                except Exception:
+                    pass
+            print(f"[policy_routing] Enabled policy routing for interface {interface} (attempt {attempt} success)", flush=True)
+            success = True
+            break
+        except Exception as e:
+            print(f"[policy_routing] Attempt {attempt} failed to enable policy routing: {e}", flush=True)
+            time.sleep(1)
+            
+    if not success:
+        print("[路由配置失败] [错误代码 3003] [ERR_ROUTE_TABLE_ADD_FAILED] 策略路由配置失败。原因: 无法向路由表 100 添加默认路由，这可能会导致通过 VPN 接口的出站路由无法正常解析。请检查系统是否支持策略路由、iproute2 工具是否完整，以及是否具有 root 权限。", flush=True)
+        log_to_json("ERROR", "Routing", "[错误代码 3003] [ERR_ROUTE_TABLE_ADD_FAILED] 策略路由配置失败。原因: 无法向路由表 100 添加默认路由")"""
+
+        replacement_setup = r"""def setup_policy_routing(interface: str = "tun0") -> None:
+    try:
+        subprocess.run(["ip", "rule", "del", "table", "100"], capture_output=True, timeout=2)
+    except Exception:
+        pass
+    try:
+        subprocess.run(["ip", "route", "flush", "table", "100"], capture_output=True, timeout=2)
+    except Exception:
+        pass
+    
+    success = False
+    for attempt in range(1, 4):
+        try:
+            # Try to resolve peer gateway IP
+            peer_ip = None
+            try:
+                res_addr = subprocess.run(["ip", "addr", "show", "dev", interface], capture_output=True, text=True, timeout=2)
+                if res_addr.returncode == 0:
+                    import re
+                    match = re.search(r"peer\s+([\d.]+)", res_addr.stdout)
+                    if match:
+                        peer_ip = match.group(1)
+            except Exception:
+                pass
+            
+            if peer_ip:
+                subprocess.run(["ip", "route", "add", "default", "via", peer_ip, "dev", interface, "table", "100"], check=True, timeout=2)
+                print(f"[policy_routing] Added default route via {peer_ip} on {interface}", flush=True)
+            else:
+                subprocess.run(["ip", "route", "add", "default", "dev", interface, "table", "100"], check=True, timeout=2)
+                print(f"[policy_routing] Added default route dev {interface} (peer IP not resolved)", flush=True)
+                
+            subprocess.run(["ip", "rule", "add", "oif", interface, "table", "100"], check=True, timeout=2)
+            
+            # Add iptables masquerade rule
+            try:
+                check_cmd = ["iptables", "-t", "nat", "-C", "POSTROUTING", "-o", interface, "-j", "MASQUERADE"]
+                if subprocess.run(check_cmd, capture_output=True).returncode != 0:
+                    subprocess.run(["iptables", "-t", "nat", "-A", "POSTROUTING", "-o", interface, "-j", "MASQUERADE"], check=True, timeout=2)
+                    print(f"[policy_routing] Configured iptables MASQUERADE for {interface}", flush=True)
+            except Exception as ie:
+                print(f"[policy_routing] Warning: failed to configure iptables MASQUERADE: {ie}", flush=True)
+                
+            # 配置反向路径过滤 rp_filter 为 loose 模式 (2)，防止回包被内核静默丢弃
+            for proc_path in ["all", "default", interface]:
+                try:
+                    subprocess.run(["sysctl", "-w", f"net.ipv4.conf.{proc_path}.rp_filter=2"], capture_output=True, timeout=2)
+                except Exception:
+                    pass
+            print(f"[policy_routing] Enabled policy routing for interface {interface} (attempt {attempt} success)", flush=True)
+            success = True
+            break
+        except Exception as e:
+            print(f"[policy_routing] Attempt {attempt} failed to enable policy routing: {e}", flush=True)
+            time.sleep(1)
+            
+    if not success:
+        print("[路由配置失败] [错误代码 3003] [ERR_ROUTE_TABLE_ADD_FAILED] 策略路由配置失败。原因: 无法向路由表 100 添加默认路由，这可能会导致通过 VPN 接口出站路由无法正常解析。请检查系统是否支持策略路由、iproute2 工具是否完整，以及是否具有 root 权限。", flush=True)
+        log_to_json("ERROR", "Routing", "[错误代码 3003] [ERR_ROUTE_TABLE_ADD_FAILED] 策略路由配置失败。原因: 无法向路由表 100 添加默认路由")"""
+
+        target_cleanup = """def cleanup_policy_routing() -> None:
+    try:
+        subprocess.run(["ip", "rule", "del", "table", "100"], capture_output=True, timeout=2)
+        subprocess.run(["ip", "route", "flush", "table", "100"], capture_output=True, timeout=2)
+        print("[policy_routing] Cleared policy routing table 100", flush=True)
+    except Exception:
+        pass"""
+
+        replacement_cleanup = r"""def cleanup_policy_routing() -> None:
+    try:
+        subprocess.run(["ip", "rule", "del", "table", "100"], capture_output=True, timeout=2)
+        subprocess.run(["ip", "route", "flush", "table", "100"], capture_output=True, timeout=2)
+        print("[policy_routing] Cleared policy routing table 100", flush=True)
+    except Exception:
+        pass
+    try:
+        subprocess.run(["iptables", "-t", "nat", "-D", "POSTROUTING", "-o", "tun0", "-j", "MASQUERADE"], capture_output=True, timeout=2)
+        print("[policy_routing] Cleared iptables MASQUERADE for tun0", flush=True)
+    except Exception:
+        pass"""
+
+        new_content = content.replace(target_setup, replacement_setup).replace(target_cleanup, replacement_cleanup)
+        if new_content != content:
+            content = new_content
+            print("Successfully patched setup_policy_routing and cleanup_policy_routing for NAT/Gateway", flush=True)
+        else:
+            print("ERROR: Failed to patch setup_policy_routing and cleanup_policy_routing!", flush=True)
 
     file_path.write_text(content, encoding='utf-8')
     print("All patches applied to vpngate_manager.py successfully!", flush=True)

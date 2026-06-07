@@ -157,6 +157,13 @@ def read_last_log_lines(file_path, max_lines=1000):
                     h, p, pr = vpn_utils.parse_remote(config_text, "")
                     if not h:
                         continue
+                    import socket
+                    resolved_ip = h
+                    if not all(c.isdigit() or c == '.' for c in h):
+                        try:
+                            resolved_ip = socket.gethostbyname(h)
+                        except Exception:
+                            pass
                     parts = path.stem.split("_")
                     country_short = "TW"
                     country_zh = "台湾"
@@ -181,7 +188,7 @@ def read_last_log_lines(file_path, max_lines=1000):
                         "country": country_zh,
                         "country_short": country_short,
                         "host_name": path.stem,
-                        "ip": h,
+                        "ip": resolved_ip,
                         "score": 999999,
                         "ping": 1,
                         "speed": 100000000,
